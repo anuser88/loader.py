@@ -23,15 +23,91 @@ Underline 4
 Reverse   7
 Hidden    8
 """
+
+import sys
+import os
+
 def ansiesc(text,code):return "\x1b["+str(code)+"m"+str(text)+"\x1b[0m"
 def info(text):print(ansiesc("[info]: "+str(text),34))
 def warn(text):print(ansiesc("[warning]: "+str(text),33))
 def nice(text):print(ansiesc("[SUCCESS]: "+str(text),32))
 def err(text):print(ansiesc("[error]: "+str(text),31))
 def quit(n=0):input(ansiesc("Press enter to close",1));sys.exit(n)
+def ask(text):return input("\x1b[2m\x1b[35m"+str(text)+"\x1b[0m")
+
+if sys.version_info[:3] < (3, 10, 0):
+    err("Python version must be 3.10 or above")
+    quit(1)
+
 info("Launching loader.py...")
 
-import sys
+# Parse arguments
+info("Parsing arguments")
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "-m",
+    "--mode",
+    choices=["e", "d", "dl", "dd"],
+    help = "choose mode(encrypt/decrypt/download/download-decrypt)"
+)
+
+parser.add_argument(
+    "-s",
+    "--source",
+    help = "file from your computer or Internet"
+)
+
+parser.add_argument(
+    "-o",
+    "--out-path",
+    help = "path to store the file"
+)
+
+parser.add_argument(
+    "--skip",
+    action="store_true",
+    help = "skip if the file already exist"
+)
+
+parser.add_argument(
+    "-p",
+    "--password",
+    help = "provide password for encryption/decryption"
+)
+
+parser.add_argument(
+    "-c",
+    "--command",
+    help = "run a command after all"
+)
+
+args = parser.parse_args()
+shell = False
+
+if args.mode != None:
+    if None in [args.source, args.out_path]:
+        parser.error("Source or output path is not provided")
+
+if not any(vars(args).values()):
+    warn("Running loader.py without arguments will open its shell")
+    shell = True
+
+if args.skip and os.path.isfile(args.out_path):
+    args.mode=None
+    args.source=None
+    args.out_path=None
+
+# Ensure dependencies
+info("Checking dependencies...")
+os.system("py -m pip install requests cryptography")
+
+# Clear terminal
+import platform
+def clear():
+    if platform.system() == "Windows": os.system("cls")
+    else: os.system("clear")
 
 ########## This is the downloader ##########
 
@@ -44,7 +120,6 @@ try:
     from urllib3.util.retry import Retry
     import threading
     import hashlib
-    import os
 except Exception as e:
     err("Import failed:\n"+str(e))
     quit(1)
@@ -195,66 +270,152 @@ try:
         return kdf.derive(password.encode())
 
     def encrypt_file_stream(in_path, out_path, password):
-        salt = os.urandom(16)
-        key = derive_key(password, salt)
-        nonce = os.urandom(12)
-
-        cipher = Cipher(algorithms.AES(key), modes.GCM(nonce))
-        encryptor = cipher.encryptor()
-
-        with open(in_path, "rb") as fin, open(out_path, "wb") as fout:
-            # write header
-            fout.write(salt + nonce)
-
-            while True:
-                chunk = fin.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-
-                ct = encryptor.update(chunk)
-                if ct:
-                    fout.write(ct)
-
-            encryptor.finalize()
-
-            # write tag
-            fout.write(encryptor.tag)
-
-    def decrypt_file_stream(in_path, out_path, password):
-        with open(in_path, "rb") as fin:
-            salt = fin.read(16)
-            nonce = fin.read(12)
-
+        try:
+            salt = os.urandom(16)
             key = derive_key(password, salt)
-
-            # read the rest (do NOT flood RAM)
-            file_size = os.path.getsize(in_path)
-            tag_size = 16
-
-            ciphertext_size = file_size - 16 - 12 - tag_size
+            nonce = os.urandom(12)
 
             cipher = Cipher(algorithms.AES(key), modes.GCM(nonce))
-            decryptor = cipher.decryptor()
+            encryptor = cipher.encryptor()
 
-            with open(out_path, "wb") as fout:
-                remaining = ciphertext_size
+            with open(in_path, "rb") as fin, open(out_path, "wb") as fout:
+                # write header
+                fout.write(salt + nonce)
 
-                while remaining > 0:
-                    chunk = fin.read(min(CHUNK_SIZE, remaining))
-                    remaining -= len(chunk)
+                while True:
+                    chunk = fin.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
 
-                    pt = decryptor.update(chunk)
-                    if pt:
-                        fout.write(pt)
+                    ct = encryptor.update(chunk)
+                    if ct:
+                        fout.write(ct)
 
-                # read tag
-                tag = fin.read(tag_size)
+                encryptor.finalize()
 
-                # verify tag
-                decryptor.finalize_with_tag(tag)
+                # write tag
+                fout.write(encryptor.tag)
+        except Exception as e:
+            err("Encryption failed:\n"+str(e))
+        nice("Operation completed successfully!")
+
+    def decrypt_file_stream(in_path, out_path, password):
+        try:
+            with open(in_path, "rb") as fin:
+                salt = fin.read(16)
+                nonce = fin.read(12)
+
+                key = derive_key(password, salt)
+
+                # read the rest (do NOT flood RAM)
+                file_size = os.path.getsize(in_path)
+                tag_size = 16
+
+                ciphertext_size = file_size - 16 - 12 - tag_size
+
+                cipher = Cipher(algorithms.AES(key), modes.GCM(nonce))
+                decryptor = cipher.decryptor()
+
+                with open(out_path, "wb") as fout:
+                    remaining = ciphertext_size
+
+                    while remaining > 0:
+                        chunk = fin.read(min(CHUNK_SIZE, remaining))
+                        remaining -= len(chunk)
+
+                        pt = decryptor.update(chunk)
+                        if pt:
+                            fout.write(pt)
+
+                    # read tag
+                    tag = fin.read(tag_size)
+
+                    # verify tag
+                    decryptor.finalize_with_tag(tag)
+        except Exception as e:
+            err("Decryption failed:\n"+str(e))
+        nice("Operation completed successfully!")
 
 except Exception as e:
     err("Init failed:\n"+str(e))
     quit(1)
 
 nice("Encryptor/decryptor initialized successfully!")
+
+def main():
+    info("Welcome to loader.py")
+    if args.mode != None:
+        info("Selected mode: "+str(args.mode))
+        info("Source: "+str(args.source))
+        info("Output path: "+str(args.out_path))
+    
+    if args.command != None:
+        info("Run command at the end: "+str(args.command))
+    
+    def do():
+        if args.mode == "e":
+            if args.password == None: args.password = ask("Password for encryption: ")
+            encrypt_file_stream(args.source, args.out_path, args.password)
+        if args.mode == "d":
+            if args.password == None: args.password = ask("Password for decryption: ")
+            decrypt_file_stream(args.source, args.out_path, args.password)
+        if args.mode == "dl":
+            smart_download(args.source, args.out_path)
+        if args.mode == "dd":
+            smart_download(args.source, args.out_path+".tmp")
+            if args.password == None: args.password = ask("Password for decryption: ")
+            decrypt_file_stream(args.out_path+".tmp", args.out_path, args.password)
+            try: os.remove(args.out_path+".tmp")
+            except: pass
+        if args.command != None:
+            info("Running command...")
+            os.system(args.command)
+        args.mode = None
+        args.source = None
+        args.out_path = None
+        args.password = None
+        args.command = None
+
+    if shell:
+        while True:
+            clear()
+            print("\n\x1b[1m\x1b[7mloader.py shell\x1b[0m\n")
+            info("Type 'exit' or 'quit' to close the shell")
+            info("Type 'help' to show available commands")
+            inp = ask(">>>")
+            print()
+            if inp in ["exit", "quit"]: break
+            if inp.strip() == "": continue
+            if inp == "help":
+                info("Available commands:")
+                info("  help - show this message")
+                info("  exit/quit - close the shell")
+                info("  mode [e/d/dl/dd] - set mode")
+                info("  src [path/url] - set source")
+                info("  out [path] - set output path")
+                info("  pass [password] - set password")
+                info("  com [command] - set command to run at the end")
+                info("  do - execute the operation")
+            if inp.startswith("mode "):
+                args.mode = inp[5:].strip() if inp[5:].strip() in ["e", "d", "dl", "dd"] else None
+                info("Mode set to "+str(args.mode))
+            if inp.startswith("src "):
+                args.source = inp[4:].strip()
+                info("Source set to "+str(args.source))
+            if inp.startswith("out "):
+                args.out_path = inp[4:].strip()
+                info("Output path set to "+str(args.out_path))
+            if inp.startswith("pass "):
+                args.password = inp[5:].strip()
+                info("Password set")
+            if inp.startswith("com "):
+                args.command = inp[4:].strip()
+            if inp.strip() == "do": do()
+            ask("Press enter to continue...")
+    else:
+        do()
+
+    print("\x1b[7m\x1b[36m\x1b[41mloader.py is quiting...\x1b[0m")
+            
+if __name__ == "__main__":
+    main()
